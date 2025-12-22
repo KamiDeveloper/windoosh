@@ -1,0 +1,34 @@
+LISTA DE ÍCONOS REQUERIDOS (Formato SVG preferible)
+
+Por favor, proporciona los siguientes íconos. Puedes pegarlos en un archivo `src/lib/icons.ts` o entregarlos individualmente.
+
+1. GENERAL
+- app-logo: Logo de Windoosh
+- icon-upload: Para el botón de "Abrir imagen" / "Cargar"
+- icon-download: Para el botón de "Guardar" / "Descargar"
+- icon-close: Para cerrar paneles o modales
+- icon-menu: Para menú principal (si aplica)
+- icon-theme-toggle: Sol / Luna para cambio de tema (futuro)
+
+2. PANELES Y SECCIONES
+- icon-edit: Para la sección de edición/resize (Lápiz o herramientas)
+- icon-compress: Para la sección de compresión (Sliders o archivo comprimido)
+- icon-settings: Engranaje para configuraciones avanzadas
+- icon-compare: Para indicar la vista de comparación
+
+3. CONTROLES ESPECÍFICOS
+- icon-arrow-right: Flecha simple
+- icon-arrow-down: Flecha desplegable
+- icon-check: Checkbox marcado
+- icon-trash: Eliminar / Resetear
+- icon-image-original: Representación archivo original
+- icon-image-optimized: Representación archivo optimizado
+- icon-columns: Para cambiar layout (opcional)
+
+4. HERRAMIENTAS (Resize/Edit)
+- icon-resize-width: Flecha horizontal (ancho)
+- icon-resize-height: Flecha vertical (alto)
+- icon-aspect-ratio-locked: Candado cerrado (mantener relación de aspecto)
+- icon-aspect-ratio-unlocked: Candado abierto
+
+NOTA: Por ahora usaré SVGs genéricos simples o texto para no detener el desarrollo, reemplazaremos con tus diseños cuando estén listos.

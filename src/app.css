@@ -1,0 +1,59 @@
+:root {
+  /* Paleta de Colores Squoosh-inspired Dark Mode */
+  --bg-app: #18181b; /* Zinc-900 */
+  --bg-panel: #202024; /* Zinc-800 aprox */
+  --bg-input: #27272a; /* Zinc-800 */
+
+  --primary: #ff3e6c; /* Squoosh Pink branding */
+  --primary-hover: #fa2356;
+
+  --accent: #4ecdc4; /* Squoosh Teal/Cyan */
+  --accent-hover: #3db9b0;
+
+  --text-main: #f4f4f5; /* Zinc-100 */
+  --text-muted: #a1a1aa; /* Zinc-400 */
+
+  --border: #3f3f46; /* Zinc-700 */
+  --border-focus: #52525b; /* Zinc-600 */
+
+  /* Tipografía */
+  --font-sans: "Inter", system-ui, -apple-system, sans-serif;
+
+  /* Animaciones */
+  --transition-fast: 0.15s ease;
+  --transition-smooth: 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+body {
+  margin: 0;
+  padding: 0;
+  background-color: var(--bg-app);
+  color: var(--text-main);
+  font-family: var(--font-sans);
+  overflow: hidden; /* Evitar scroll global en la ventana */
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Scrollbars personalizados */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: var(--bg-app);
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--border-focus);
+}
+
+/* Utilidades comunes */
+button {
+  font-family: inherit;
+}

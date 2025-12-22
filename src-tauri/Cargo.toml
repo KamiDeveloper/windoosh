@@ -1,0 +1,82 @@
+[package]
+name = "windoosh"
+version = "0.2.0"
+description = "High-performance image optimizer with zero-copy architecture"
+authors = ["you"]
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[lib]
+# The `_lib` suffix may seem redundant but it is necessary
+# to make the lib name unique and wouldn't conflict with the bin name.
+# This seems to be only an issue on Windows, see https://github.com/rust-lang/cargo/issues/8519
+name = "windoosh_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["protocol-asset"] }
+
+# Squoosh Parity Codecs
+oxipng = "9.0"
+# ravif = "0.11"   # Requiere NASM, comentado temporalmente
+# imgref = "1.10"
+# rgb = "0.8"
+imagequant = "4.3"
+zune-jpeg = "0.4"
+webp = "0.3" # Libwebp bindings para paridad con Squoosh
+
+# Tauri Plugins
+tauri-plugin-opener = "2"
+tauri-plugin-dialog = "2"
+tauri-plugin-fs = "2"
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Procesamiento de imágenes
+image = "0.25"
+base64 = "0.22"
+
+# High-performance resize con SIMD (AVX2/SSE4.1/NEON)
+fast_image_resize = { version = "5", features = ["rayon"] }
+
+# Memory-mapped files para zero-copy I/O
+memmap2 = "0.9"
+
+# Mutex/RwLock de alto rendimiento
+parking_lot = "0.12"
+
+# Paralelismo de datos
+rayon = "1.10"
+
+# Concurrencia async
+tokio = { version = "1", features = ["full"] }
+
+# Utilidades
+thiserror = "2"
+uuid = { version = "1", features = ["v4"] }
+num_cpus = "1.16"
+
+[dev-dependencies]
+criterion = { version = "0.5", features = ["html_reports"] }
+
+[[bench]]
+name = "image_processing"
+harness = false
+
+[features]
+default = []
+# Feature flags para optimizaciones opcionales futuras
+# mozjpeg-native = ["dep:mozjpeg"]
+# gpu = ["dep:wgpu"]
+
+[profile.release]
+lto = true
+codegen-units = 1
+opt-level = 3
+strip = true
