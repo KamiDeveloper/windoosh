@@ -1,7 +1,25 @@
+<!--
+  CompareSlider.svelte
+  Sistema de previsualización Canvas-based (como Squoosh)
+  
+  Características:
+  - Renderizado Canvas a resolución COMPLETA (no Base64 reducido)
+  - Pinch-zoom sincronizado entre ambos canvas
+  - CSS transforms para zoom/pan (no re-escala píxeles)
+  - ImageData directo desde Rust (RGBA raw bytes)
+-->
 <script lang="ts">
-  import { originalImage, optimizedPreview, isLoading } from "$lib/stores/imageStore";
-  import { createEventDispatcher, onMount, onDestroy } from "svelte";
+  import { onMount, onDestroy, createEventDispatcher } from "svelte";
+  import { invoke } from "@tauri-apps/api/core";
   import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+  import { 
+    originalImageInfo, 
+    optimizationResult, 
+    isLoading,
+    isProcessing,
+    rawToImageData,
+    type ImageDataRaw 
+  } from "$lib/stores/imageStore";
 
   // Tipos para eventos de drag & drop en Tauri 2.0
   interface TauriDropPayload {
@@ -12,19 +30,32 @@
 
   const dispatch = createEventDispatcher<{ openFile: void }>();
 
-  let sliderPosition = 50;
+  // Canvas refs
+  let canvasOriginal: HTMLCanvasElement;
+  let canvasOptimized: HTMLCanvasElement;
   let container: HTMLDivElement;
 
-  // Transform State
+  // Slider position (0-100)
+  let sliderPosition = 50;
+
+  // Transform State (aplicado via CSS, NO re-escala píxeles)
   let scale = 1;
   let translateX = 0;
   let translateY = 0;
+
+  // Interaction State
   let isDraggingSlider = false;
   let isPanning = false;
-  let startX = 0;
-  let startY = 0;
+  let panStartX = 0;
+  let panStartY = 0;
+  let panStartTranslateX = 0;
+  let panStartTranslateY = 0;
 
-  // Drag & Drop State (Tauri native)
+  // Image dimensions (for proper sizing)
+  let imageWidth = 0;
+  let imageHeight = 0;
+
+  // Drag & Drop State
   let isDragOver = false;
   let unlistenDrop: UnlistenFn | null = null;
   let unlistenHover: UnlistenFn | null = null;
@@ -37,6 +68,10 @@
     const lower = path.toLowerCase();
     return validExtensions.some((ext) => lower.endsWith(ext));
   }
+
+  // ========================================================================
+  // Lifecycle
+  // ========================================================================
 
   onMount(async () => {
     try {
@@ -70,21 +105,117 @@
     if (unlistenLeave) unlistenLeave();
   });
 
-  // Computed transform style (shared by both layers)
-  $: transformStyle = `transform: translate(${translateX}px, ${translateY}px) scale(${scale});`;
+  // ========================================================================
+  // Canvas Rendering - Full Resolution
+  // ========================================================================
 
+  /**
+   * Carga y dibuja la imagen original en el canvas
+   * Se llama cuando cambia originalImageInfo
+   */
+  async function loadOriginalCanvas() {
+    if (!$originalImageInfo || !canvasOriginal) return;
+    
+    try {
+      // Obtener raw RGBA data desde Rust
+      const rawData = await invoke<ImageDataRaw>("get_original_image_data");
+      
+      // Convertir a ImageData y dibujar
+      const imageData = rawToImageData(rawData);
+      drawToCanvas(canvasOriginal, imageData);
+      
+      // Actualizar dimensiones
+      imageWidth = rawData.width;
+      imageHeight = rawData.height;
+      
+      // Reset view cuando carga nueva imagen
+      resetView();
+    } catch (err) {
+      console.error("Error cargando canvas original:", err);
+    }
+  }
+
+  /**
+   * Carga y dibuja la imagen procesada en el canvas
+   * Se llama cuando cambia optimizationResult
+   */
+  async function loadProcessedCanvas() {
+    if (!$optimizationResult || !canvasOptimized) return;
+    
+    try {
+      // Obtener raw RGBA data desde Rust
+      const rawData = await invoke<ImageDataRaw>("get_processed_image_data");
+      
+      // Convertir a ImageData y dibujar
+      const imageData = rawToImageData(rawData);
+      drawToCanvas(canvasOptimized, imageData);
+      
+      // Actualizar dimensiones (puede cambiar si hay resize)
+      imageWidth = rawData.width;
+      imageHeight = rawData.height;
+    } catch (err) {
+      console.error("Error cargando canvas procesado:", err);
+    }
+  }
+
+  /**
+   * Dibuja ImageData en un canvas a resolución completa
+   * Similar a drawDataToCanvas de Squoosh
+   */
+  function drawToCanvas(canvas: HTMLCanvasElement, imageData: ImageData): void {
+    // Establecer dimensiones del canvas al tamaño real de la imagen
+    canvas.width = imageData.width;
+    canvas.height = imageData.height;
+    
+    const ctx = canvas.getContext('2d', {
+      alpha: true,
+      desynchronized: true, // Mejor performance
+    });
+    
+    if (ctx) {
+      ctx.imageSmoothingEnabled = true;
+      ctx.imageSmoothingQuality = 'high';
+      ctx.putImageData(imageData, 0, 0);
+    }
+  }
+
+  // Reactive: cargar canvas cuando cambian los stores
+  $: if ($originalImageInfo && canvasOriginal) {
+    loadOriginalCanvas();
+  }
+
+  $: if ($optimizationResult && canvasOptimized) {
+    loadProcessedCanvas();
+  }
+
+  // ========================================================================
+  // Transform Style (CSS-based zoom/pan)
+  // ========================================================================
+
+  $: transformStyle = `
+    transform: translate(${translateX}px, ${translateY}px) scale(${scale});
+    transform-origin: 0 0;
+  `;
+
+  // ========================================================================
   // Slider Logic
+  // ========================================================================
+
   function handleMouseDown(e: MouseEvent) {
-    if ((e.target as Element).closest(".slider-handle")) {
+    const target = e.target as Element;
+    
+    if (target.closest(".slider-handle")) {
       isDraggingSlider = true;
       updateSliderPosition(e);
-      e.preventDefault(); // Prevent text selection
-    } else if ($originalImage && $optimizedPreview) {
-      // Solo permitir pan cuando hay imagen
+      e.preventDefault();
+    } else if ($originalImageInfo && $optimizationResult) {
+      // Pan mode
       isPanning = true;
-      startX = e.clientX - translateX;
-      startY = e.clientY - translateY;
-      container.style.cursor = "grabbing";
+      panStartX = e.clientX;
+      panStartY = e.clientY;
+      panStartTranslateX = translateX;
+      panStartTranslateY = translateY;
+      if (container) container.style.cursor = "grabbing";
     }
   }
 
@@ -92,15 +223,15 @@
     if (isDraggingSlider) {
       updateSliderPosition(e);
     } else if (isPanning) {
-      translateX = e.clientX - startX;
-      translateY = e.clientY - startY;
+      translateX = panStartTranslateX + (e.clientX - panStartX);
+      translateY = panStartTranslateY + (e.clientY - panStartY);
     }
   }
 
   function handleMouseUp() {
     isDraggingSlider = false;
     isPanning = false;
-    if (container && $originalImage) container.style.cursor = "grab";
+    if (container && $originalImageInfo) container.style.cursor = "grab";
   }
 
   function updateSliderPosition(e: MouseEvent) {
@@ -110,16 +241,18 @@
     sliderPosition = Math.max(0, Math.min(100, (x / rect.width) * 100));
   }
 
+  // ========================================================================
   // Zoom Logic (Centered on cursor)
+  // ========================================================================
+
   function handleWheel(e: WheelEvent) {
-    if (!container || !$originalImage) return;
+    if (!container || !$originalImageInfo) return;
     e.preventDefault();
 
     const rect = container.getBoundingClientRect();
     const mouseX = e.clientX - rect.left;
     const mouseY = e.clientY - rect.top;
 
-    // Calculate Mouse Position relative to content (before zoom)
     const contentMouseX = (mouseX - translateX) / scale;
     const contentMouseY = (mouseY - translateY) / scale;
 
@@ -127,17 +260,19 @@
     const delta = e.deltaY < 0 ? 1 : -1;
     let newScale = scale + delta * zoomIntensity * scale;
 
-    // Clamp Scale
-    newScale = Math.max(0.1, Math.min(newScale, 20));
+    // Clamp Scale (0.1x a 50x para imágenes 4K)
+    newScale = Math.max(0.1, Math.min(newScale, 50));
 
-    // Calculate new Translate to keep contentMouse fixed
     translateX = mouseX - contentMouseX * newScale;
     translateY = mouseY - contentMouseY * newScale;
 
     scale = newScale;
   }
 
-  // Restore/Reset View
+  // ========================================================================
+  // View Control
+  // ========================================================================
+
   function handleContextMenu(e: MouseEvent) {
     e.preventDefault();
     resetView();
@@ -150,25 +285,35 @@
     sliderPosition = 50;
   }
 
-  // Touch Support (Basic Slider only for now, can be expanded)
+  // ========================================================================
+  // Touch Support
+  // ========================================================================
+
   function handleTouchStart(e: TouchEvent) {
     if ((e.target as Element).closest(".slider-handle")) {
       isDraggingSlider = true;
     }
   }
 
-  // Click to open (empty state)
+  // ========================================================================
+  // Empty State
+  // ========================================================================
+
   function handleEmptyClick() {
     dispatch("openFile");
   }
 
-  // Keyboard shortcut
   function handleKeydown(e: KeyboardEvent) {
     if (e.ctrlKey && e.key === "o") {
       e.preventDefault();
       dispatch("openFile");
     }
   }
+
+  // Estado: tenemos imagen original cargada? (no esperar optimized)
+  $: hasOriginal = $originalImageInfo !== null;
+  // Estado: tenemos ambas imágenes? (para habilitar slider)
+  $: hasOptimized = $optimizationResult !== null;
 </script>
 
 <svelte:window on:mousemove={handleMouseMove} on:mouseup={handleMouseUp} on:keydown={handleKeydown} />
@@ -176,7 +321,7 @@
 <div
   class="compare-container"
   class:drag-over={isDragOver}
-  class:has-image={$originalImage && $optimizedPreview}
+  class:has-image={hasOriginal}
   bind:this={container}
   on:mousedown={handleMouseDown}
   on:touchstart={handleTouchStart}
@@ -188,8 +333,8 @@
   aria-valuemax={100}
   tabindex="0"
 >
-  {#if $originalImage && $optimizedPreview}
-    <!-- Fondo Checkerboard Estático (no se mueve con pan/zoom) -->
+  {#if hasOriginal}
+    <!-- Fondo Checkerboard Estático -->
     <div class="checkerboard-bg"></div>
 
     <!-- Capa Original (visible a la IZQUIERDA del slider) -->
@@ -198,11 +343,11 @@
       style="clip-path: inset(0 {100 - sliderPosition}% 0 0);"
     >
       <div class="transform-wrapper" style={transformStyle}>
-        <img
-          src={$originalImage.preview_base64}
-          alt="Original"
-          draggable="false"
-        />
+        <canvas
+          bind:this={canvasOriginal}
+          class="image-canvas"
+          style="width: {imageWidth}px; height: {imageHeight}px;"
+        ></canvas>
       </div>
     </div>
 
@@ -211,38 +356,52 @@
       class="image-layer optimized-layer" 
       style="clip-path: inset(0 0 0 {sliderPosition}%);"
     >
-      <div class="transform-wrapper" style={transformStyle}>
-        <img
-          src={$optimizedPreview.preview_base64}
-          alt="Optimizada"
-          draggable="false"
-        />
-      </div>
+      {#if hasOptimized}
+        <div class="transform-wrapper" style={transformStyle}>
+          <canvas
+            bind:this={canvasOptimized}
+            class="image-canvas"
+            style="width: {imageWidth}px; height: {imageHeight}px;"
+          ></canvas>
+        </div>
+      {:else if $isProcessing}
+        <!-- Mostrar indicador de carga mientras se procesa -->
+        <div class="optimized-loading-overlay">
+          <div class="processing-spinner"></div>
+          <span class="optimized-loading-text">Optimizing...</span>
+        </div>
+      {/if}
     </div>
 
     <!-- UI Overlays -->
     <span class="label left-label">Original</span>
     <span class="label right-label">Optimized</span>
 
+    <!-- Processing overlay (solo cuando ya hay imagen optimizada y se re-procesa) -->
+    {#if $isProcessing && hasOptimized}
+      <div class="processing-overlay">
+        <div class="processing-spinner"></div>
+        <span class="processing-text">Updating preview...</span>
+      </div>
+    {/if}
+
     <!-- Handle del slider -->
     <div class="slider-handle" style="left: {sliderPosition}%;">
       <div class="handle-line"></div>
       <div class="handle-grip">
-        <svg
-          width="20"
-          height="20"
-          viewBox="0 0 24 24"
-          fill="none"
-          stroke="currentColor"
-          stroke-width="2"
-        >
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
           <path d="M18 8L22 12L18 16"></path>
           <path d="M6 8L2 12L6 16"></path>
         </svg>
       </div>
     </div>
+
+    <!-- Zoom indicator -->
+    <div class="zoom-indicator">
+      {Math.round(scale * 100)}%
+    </div>
   {:else}
-    <!-- Estado vacío mejorado (D+E+F+G) -->
+    <!-- Estado vacío -->
     <button 
       class="empty-state" 
       class:loading={$isLoading}
@@ -250,12 +409,10 @@
       type="button"
       aria-label="Abrir imagen"
     >
-      <!-- Logo con animación breathing (E) -->
       <div class="logo-container">
         <img src="/logo.svg" alt="Windoosh" class="logo" draggable="false" />
       </div>
 
-      <!-- Mensaje principal -->
       <div class="empty-content">
         {#if $isLoading}
           <div class="loading-spinner"></div>
@@ -263,17 +420,14 @@
         {:else if isDragOver}
           <p class="empty-title highlight">Suelta para abrir</p>
         {:else}
-          <!-- Botón grande (G) -->
           <p class="empty-title">Arrastra una imagen aquí</p>
           <p class="empty-subtitle">o haz clic para explorar</p>
-          <!-- Shortcut (F) -->
           <span class="shortcut-hint">
             <kbd>Ctrl</kbd> + <kbd>O</kbd>
           </span>
         {/if}
       </div>
 
-      <!-- Drop zone visual feedback -->
       <div class="drop-zone-border"></div>
     </button>
   {/if}
@@ -293,7 +447,6 @@
     cursor: grab;
   }
 
-  /* Fondo Checkerboard Estático - NO se mueve con pan/zoom */
   .checkerboard-bg {
     position: absolute;
     inset: 0;
@@ -302,17 +455,12 @@
       linear-gradient(45deg, transparent 75%, #2a2a2e 75%),
       linear-gradient(-45deg, transparent 75%, #2a2a2e 75%);
     background-size: 20px 20px;
-    background-position:
-      0 0,
-      0 10px,
-      10px -10px,
-      -10px 0px;
+    background-position: 0 0, 0 10px, 10px -10px, -10px 0px;
     background-color: var(--bg-app);
     pointer-events: none;
     z-index: 0;
   }
 
-  /* Capas de imagen - el clip-path se aplica AQUÍ (nivel viewport) */
   .image-layer {
     position: absolute;
     inset: 0;
@@ -320,15 +468,9 @@
     pointer-events: none;
   }
 
-  .original-layer {
-    z-index: 1;
-  }
+  .original-layer { z-index: 1; }
+  .optimized-layer { z-index: 2; }
 
-  .optimized-layer {
-    z-index: 2;
-  }
-
-  /* Transform wrapper - contiene la imagen que se transforma */
   .transform-wrapper {
     position: absolute;
     inset: 0;
@@ -336,19 +478,21 @@
     align-items: center;
     justify-content: center;
     will-change: transform;
-    transform-origin: 0 0;
     pointer-events: none;
   }
 
-  .transform-wrapper img {
-    max-width: 100%;
-    max-height: 100%;
-    object-fit: contain;
+  /* 
+   * Canvas - RESOLUCIÓN COMPLETA
+   * El canvas tiene width/height al tamaño REAL de la imagen
+   * El zoom se hace via CSS transform, NO re-escalando píxeles
+   */
+  .image-canvas {
     pointer-events: none;
     box-shadow: 0 5px 20px rgba(0, 0, 0, 0.5);
+    /* auto = smooth, pixelated = ver píxeles reales */
+    image-rendering: auto;
   }
 
-  /* Labels */
   .label {
     position: absolute;
     bottom: 24px;
@@ -376,7 +520,6 @@
     color: #1a1a1a;
   }
 
-  /* Slider Handle */
   .slider-handle {
     position: absolute;
     top: 0;
@@ -414,9 +557,75 @@
     cursor: col-resize;
   }
 
-  /* ========================================
-     EMPTY STATE MEJORADO (D+E+F+G)
-     ======================================== */
+  .zoom-indicator {
+    position: absolute;
+    top: 16px;
+    left: 50%;
+    transform: translateX(-50%);
+    padding: 6px 14px;
+    border-radius: 6px;
+    font-size: 12px;
+    font-weight: 600;
+    background: rgba(0, 0, 0, 0.7);
+    color: white;
+    backdrop-filter: blur(8px);
+    z-index: 20;
+    pointer-events: none;
+  }
+
+  .processing-overlay {
+    position: absolute;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.3);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 12px;
+    z-index: 25;
+    pointer-events: none;
+  }
+
+  .processing-text {
+    color: white;
+    font-size: 12px;
+    font-weight: 500;
+    text-shadow: 0 1px 2px rgba(0, 0, 0, 0.5);
+  }
+
+  /* Loading overlay para lado optimizado cuando no hay imagen aún */
+  .optimized-loading-overlay {
+    position: absolute;
+    inset: 0;
+    background: rgba(26, 26, 30, 0.9);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 16px;
+    z-index: 5;
+  }
+
+  .optimized-loading-text {
+    color: var(--text-muted);
+    font-size: 14px;
+    font-weight: 500;
+  }
+
+  .processing-spinner {
+    width: 48px;
+    height: 48px;
+    border: 3px solid rgba(255, 255, 255, 0.2);
+    border-top-color: var(--accent);
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+  }
+
+  @keyframes spin {
+    to { transform: rotate(360deg); }
+  }
+
+  /* Empty State */
   .empty-state {
     position: relative;
     display: flex;
@@ -437,18 +646,13 @@
     background: rgba(255, 255, 255, 0.02);
   }
 
-  .empty-state:focus {
-    outline: none;
-  }
+  .empty-state:focus { outline: none; }
 
   .empty-state:focus-visible .drop-zone-border {
     border-color: var(--accent);
   }
 
-  /* Logo con animación breathing (E) */
-  .logo-container {
-    margin-bottom: 24px;
-  }
+  .logo-container { margin-bottom: 24px; }
 
   .logo {
     width: 80px;
@@ -458,17 +662,10 @@
   }
 
   @keyframes breathing {
-    0%, 100% {
-      transform: scale(1);
-      opacity: 0.85;
-    }
-    50% {
-      transform: scale(1.05);
-      opacity: 1;
-    }
+    0%, 100% { transform: scale(1); opacity: 0.85; }
+    50% { transform: scale(1.05); opacity: 1; }
   }
 
-  /* Contenido del empty state */
   .empty-content {
     display: flex;
     flex-direction: column;
@@ -485,9 +682,7 @@
     transition: color 0.2s ease;
   }
 
-  .empty-title.highlight {
-    color: var(--accent);
-  }
+  .empty-title.highlight { color: var(--accent); }
 
   .empty-subtitle {
     font-size: 14px;
@@ -495,7 +690,6 @@
     opacity: 0.7;
   }
 
-  /* Shortcut hint (F) */
   .shortcut-hint {
     display: flex;
     align-items: center;
@@ -518,7 +712,6 @@
     box-shadow: 0 1px 2px rgba(0, 0, 0, 0.2);
   }
 
-  /* Drop zone border (D) */
   .drop-zone-border {
     position: absolute;
     inset: 24px;
@@ -532,7 +725,6 @@
     border-color: var(--text-muted);
   }
 
-  /* Drag Over State */
   .compare-container.drag-over .drop-zone-border {
     border-color: var(--accent);
     background: rgba(78, 205, 196, 0.05);
@@ -544,22 +736,15 @@
     opacity: 1;
   }
 
-  /* Loading State */
-  .empty-state.loading {
-    cursor: wait;
-  }
+  .empty-state.loading { cursor: wait; }
 
   .empty-state.loading .logo {
     animation: pulse-loading 1s ease-in-out infinite;
   }
 
   @keyframes pulse-loading {
-    0%, 100% {
-      opacity: 0.5;
-    }
-    50% {
-      opacity: 1;
-    }
+    0%, 100% { opacity: 0.5; }
+    50% { opacity: 1; }
   }
 
   .loading-spinner {
@@ -570,11 +755,5 @@
     border-radius: 50%;
     animation: spin 0.8s linear infinite;
     margin-bottom: 8px;
-  }
-
-  @keyframes spin {
-    to {
-      transform: rotate(360deg);
-    }
   }
 </style>

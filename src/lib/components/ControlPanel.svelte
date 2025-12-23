@@ -8,8 +8,8 @@
   import { invoke } from "@tauri-apps/api/core";
   import { open, save } from "@tauri-apps/plugin-dialog";
   import {
-    originalImage,
-    optimizedPreview,
+    originalImageInfo,
+    optimizationResult,
     encoderOptions,
     isLoading,
     isProcessing,
@@ -53,20 +53,20 @@
   });
 
   // Reactividad para dimensiones iniciales
-  $: if ($originalImage && resizeWidth === 0 && !resizeEnabled) {
-    resizeWidth = $originalImage.width;
-    resizeHeight = $originalImage.height;
+  $: if ($originalImageInfo && resizeWidth === 0 && !resizeEnabled) {
+    resizeWidth = $originalImageInfo.width;
+    resizeHeight = $originalImageInfo.height;
     aspectRatio = resizeWidth / resizeHeight;
   }
 
   // Handle Preset Change
   function handlePresetChange() {
-    if (!$originalImage) return;
+    if (!$originalImageInfo) return;
     if (resizePreset === -1) return; // Custom
 
     const factor = resizePreset / 100;
-    resizeWidth = Math.round($originalImage.width * factor);
-    resizeHeight = Math.round($originalImage.height * factor);
+    resizeWidth = Math.round($originalImageInfo.width * factor);
+    resizeHeight = Math.round($originalImageInfo.height * factor);
     triggerProcess();
   }
 
@@ -89,16 +89,25 @@
   }
 
   function toggleResize() {
-    if (!resizeEnabled && $originalImage) {
+    if (!resizeEnabled && $originalImageInfo) {
       // Reset to original when enabling
-      resizeWidth = $originalImage.width;
-      resizeHeight = $originalImage.height;
+      resizeWidth = $originalImageInfo.width;
+      resizeHeight = $originalImageInfo.height;
       resizePreset = 100;
+      // Si estamos habilitando con valores = original, no procesar
+      // (el resultado sería idéntico)
+      return;
     }
-    triggerProcess(); // Process immediately on toggle
+    // Solo procesar si estamos deshabilitando (para volver a original sin resize)
+    triggerProcess();
   }
 
   function toggleQuantize() {
+    // Si estamos habilitando quantize con 256 colores, no hay cambio real
+    // (256 colores = paleta completa, sin reducción)
+    if (quantizeEnabled && quantizeColors === 256) {
+      return;
+    }
     triggerProcess();
   }
 
@@ -132,7 +141,7 @@
     isLoading.set(true);
     try {
       const result = await invoke<ImageInfo>("load_image", { path });
-      originalImage.set(result);
+      originalImageInfo.set(result);
       if (result) {
         resizeWidth = result.width;
         resizeHeight = result.height;
@@ -147,7 +156,7 @@
   }
 
   async function processImage() {
-    if (!$originalImage) return;
+    if (!$originalImageInfo) return;
     isProcessing.set(true);
 
     // Construir request
@@ -173,7 +182,7 @@
       const result = await invoke<OptimizationResult>("process_image", {
         request,
       });
-      optimizedPreview.set(result);
+      optimizationResult.set(result);
     } catch (err) {
       console.error("Error al procesar imagen:", err);
     } finally {
@@ -210,8 +219,8 @@
   }
 
   async function handleSave() {
-    if (!$originalImage || !$optimizedPreview) return;
-    const ext = $optimizedPreview.extension;
+    if (!$originalImageInfo || !$optimizationResult) return;
+    const ext = $optimizationResult.extension;
     try {
       const selected = await save({
         filters: [
@@ -580,7 +589,7 @@
   </div>
 
   <!-- Footer Actions -->
-  {#if $optimizedPreview}
+  {#if $optimizationResult}
     <div class="panel-footer" transition:slide>
       <div class="stats-card">
         <div class="stat-item">
@@ -589,12 +598,12 @@
         </div>
         <div class="stat-divider">↓</div>
         <div class="stat-item">
-          <span class="label">{$optimizedPreview.extension.toUpperCase()}</span>
+          <span class="label">{$optimizationResult.extension.toUpperCase()}</span>
           <span class="val highlight">{$optimizedSizeFormatted}</span>
         </div>
         <div
           class="stat-badge"
-          class:negative={!$optimizedPreview.savings_percent}
+          class:negative={!$optimizationResult.savings_percent}
         >
           {$savingsFormatted}
         </div>
