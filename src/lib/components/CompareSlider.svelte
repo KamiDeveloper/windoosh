@@ -12,14 +12,17 @@
   import { onMount, onDestroy, createEventDispatcher } from "svelte";
   import { invoke } from "@tauri-apps/api/core";
   import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-  import { 
-    originalImageInfo, 
-    optimizationResult, 
+  import {
+    originalImageInfo,
+    optimizationResult,
     isLoading,
     isProcessing,
     rawToImageData,
-    type ImageDataRaw 
+    droppedFile,
+    type ImageDataRaw,
+    resetStores,
   } from "$lib/stores/imageStore";
+  import { generalIcons } from "$lib/icons";
 
   // Tipos para eventos de drag & drop en Tauri 2.0
   interface TauriDropPayload {
@@ -84,16 +87,20 @@
         isDragOver = false;
       });
 
-      unlistenDrop = await listen<TauriDropPayload>("tauri://drag-drop", (event) => {
-        isDragOver = false;
-        const paths = event.payload.paths;
-        if (paths && paths.length > 0) {
-          const filePath = paths[0];
-          if (isValidImagePath(filePath)) {
-            window.dispatchEvent(new CustomEvent("load-dropped-file", { detail: filePath }));
+      unlistenDrop = await listen<TauriDropPayload>(
+        "tauri://drag-drop",
+        (event) => {
+          isDragOver = false;
+          const paths = event.payload.paths;
+          if (paths && paths.length > 0) {
+            const filePath = paths[0];
+            if (isValidImagePath(filePath)) {
+              // Updated: Use store instead of window event
+              droppedFile.set(filePath);
+            }
           }
         }
-      });
+      );
     } catch (e) {
       // En dev sin Tauri, ignorar
     }
@@ -115,19 +122,19 @@
    */
   async function loadOriginalCanvas() {
     if (!$originalImageInfo || !canvasOriginal) return;
-    
+
     try {
       // Obtener raw RGBA data desde Rust
       const rawData = await invoke<ImageDataRaw>("get_original_image_data");
-      
+
       // Convertir a ImageData y dibujar
       const imageData = rawToImageData(rawData);
       drawToCanvas(canvasOriginal, imageData);
-      
+
       // Actualizar dimensiones
       imageWidth = rawData.width;
       imageHeight = rawData.height;
-      
+
       // Reset view cuando carga nueva imagen
       resetView();
     } catch (err) {
@@ -141,15 +148,15 @@
    */
   async function loadProcessedCanvas() {
     if (!$optimizationResult || !canvasOptimized) return;
-    
+
     try {
       // Obtener raw RGBA data desde Rust
       const rawData = await invoke<ImageDataRaw>("get_processed_image_data");
-      
+
       // Convertir a ImageData y dibujar
       const imageData = rawToImageData(rawData);
       drawToCanvas(canvasOptimized, imageData);
-      
+
       // Actualizar dimensiones (puede cambiar si hay resize)
       imageWidth = rawData.width;
       imageHeight = rawData.height;
@@ -166,15 +173,15 @@
     // Establecer dimensiones del canvas al tamaño real de la imagen
     canvas.width = imageData.width;
     canvas.height = imageData.height;
-    
-    const ctx = canvas.getContext('2d', {
+
+    const ctx = canvas.getContext("2d", {
       alpha: true,
       desynchronized: true, // Mejor performance
     });
-    
+
     if (ctx) {
       ctx.imageSmoothingEnabled = true;
-      ctx.imageSmoothingQuality = 'high';
+      ctx.imageSmoothingQuality = "high";
       ctx.putImageData(imageData, 0, 0);
     }
   }
@@ -203,7 +210,7 @@
 
   function handleMouseDown(e: MouseEvent) {
     const target = e.target as Element;
-    
+
     if (target.closest(".slider-handle")) {
       isDraggingSlider = true;
       updateSliderPosition(e);
@@ -316,7 +323,11 @@
   $: hasOptimized = $optimizationResult !== null;
 </script>
 
-<svelte:window on:mousemove={handleMouseMove} on:mouseup={handleMouseUp} on:keydown={handleKeydown} />
+<svelte:window
+  on:mousemove={handleMouseMove}
+  on:mouseup={handleMouseUp}
+  on:keydown={handleKeydown}
+/>
 
 <div
   class="compare-container"
@@ -338,8 +349,8 @@
     <div class="checkerboard-bg"></div>
 
     <!-- Capa Original (visible a la IZQUIERDA del slider) -->
-    <div 
-      class="image-layer original-layer" 
+    <div
+      class="image-layer original-layer"
       style="clip-path: inset(0 {100 - sliderPosition}% 0 0);"
     >
       <div class="transform-wrapper" style={transformStyle}>
@@ -352,8 +363,8 @@
     </div>
 
     <!-- Capa Optimizada (visible a la DERECHA del slider) -->
-    <div 
-      class="image-layer optimized-layer" 
+    <div
+      class="image-layer optimized-layer"
       style="clip-path: inset(0 0 0 {sliderPosition}%);"
     >
       {#if hasOptimized}
@@ -377,6 +388,15 @@
     <span class="label left-label">Original</span>
     <span class="label right-label">Optimized</span>
 
+    <!-- FLOATING CLOSE BUTTON -->
+    <button
+      class="fab-close"
+      title="Cerrar Imagen"
+      on:click|stopPropagation={resetStores}
+    >
+      {@html generalIcons.iconClose}
+    </button>
+
     <!-- Processing overlay (solo cuando ya hay imagen optimizada y se re-procesa) -->
     {#if $isProcessing && hasOptimized}
       <div class="processing-overlay">
@@ -389,7 +409,14 @@
     <div class="slider-handle" style="left: {sliderPosition}%;">
       <div class="handle-line"></div>
       <div class="handle-grip">
-        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <svg
+          width="20"
+          height="20"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="2"
+        >
           <path d="M18 8L22 12L18 16"></path>
           <path d="M6 8L2 12L6 16"></path>
         </svg>
@@ -402,8 +429,8 @@
     </div>
   {:else}
     <!-- Estado vacío -->
-    <button 
-      class="empty-state" 
+    <button
+      class="empty-state"
       class:loading={$isLoading}
       on:click={handleEmptyClick}
       type="button"
@@ -434,6 +461,38 @@
 </div>
 
 <style>
+  /* FLOATING ACTION BUTTON STYLES */
+  .fab-close {
+    position: absolute;
+    top: 24px;
+    right: 24px;
+    width: 48px;
+    height: 48px;
+    border-radius: 50%;
+    background: var(--primary); /* Squoosh Pink branding */
+    color: white;
+    border: none;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 24px;
+    cursor: pointer;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+    z-index: 50;
+    transition:
+      transform 0.2s cubic-bezier(0.34, 1.56, 0.64, 1),
+      background-color 0.2s;
+  }
+
+  .fab-close:hover {
+    background: var(--primary-hover);
+    transform: scale(1.1);
+  }
+
+  .fab-close:active {
+    transform: scale(0.95);
+  }
+
   .compare-container {
     position: relative;
     width: 100%;
@@ -455,7 +514,11 @@
       linear-gradient(45deg, transparent 75%, #2a2a2e 75%),
       linear-gradient(-45deg, transparent 75%, #2a2a2e 75%);
     background-size: 20px 20px;
-    background-position: 0 0, 0 10px, 10px -10px, -10px 0px;
+    background-position:
+      0 0,
+      0 10px,
+      10px -10px,
+      -10px 0px;
     background-color: var(--bg-app);
     pointer-events: none;
     z-index: 0;
@@ -468,8 +531,12 @@
     pointer-events: none;
   }
 
-  .original-layer { z-index: 1; }
-  .optimized-layer { z-index: 2; }
+  .original-layer {
+    z-index: 1;
+  }
+  .optimized-layer {
+    z-index: 2;
+  }
 
   .transform-wrapper {
     position: absolute;
@@ -481,7 +548,7 @@
     pointer-events: none;
   }
 
-  /* 
+  /*
    * Canvas - RESOLUCIÓN COMPLETA
    * El canvas tiene width/height al tamaño REAL de la imagen
    * El zoom se hace via CSS transform, NO re-escalando píxeles
@@ -622,7 +689,9 @@
   }
 
   @keyframes spin {
-    to { transform: rotate(360deg); }
+    to {
+      transform: rotate(360deg);
+    }
   }
 
   /* Empty State */
@@ -646,13 +715,17 @@
     background: rgba(255, 255, 255, 0.02);
   }
 
-  .empty-state:focus { outline: none; }
+  .empty-state:focus {
+    outline: none;
+  }
 
   .empty-state:focus-visible .drop-zone-border {
     border-color: var(--accent);
   }
 
-  .logo-container { margin-bottom: 24px; }
+  .logo-container {
+    margin-bottom: 24px;
+  }
 
   .logo {
     width: 80px;
@@ -662,8 +735,15 @@
   }
 
   @keyframes breathing {
-    0%, 100% { transform: scale(1); opacity: 0.85; }
-    50% { transform: scale(1.05); opacity: 1; }
+    0%,
+    100% {
+      transform: scale(1);
+      opacity: 0.85;
+    }
+    50% {
+      transform: scale(1.05);
+      opacity: 1;
+    }
   }
 
   .empty-content {
@@ -682,7 +762,9 @@
     transition: color 0.2s ease;
   }
 
-  .empty-title.highlight { color: var(--accent); }
+  .empty-title.highlight {
+    color: var(--accent);
+  }
 
   .empty-subtitle {
     font-size: 14px;
@@ -718,7 +800,9 @@
     border: 2px dashed var(--border);
     border-radius: 16px;
     pointer-events: none;
-    transition: border-color 0.2s ease, background-color 0.2s ease;
+    transition:
+      border-color 0.2s ease,
+      background-color 0.2s ease;
   }
 
   .empty-state:hover .drop-zone-border {
@@ -736,15 +820,22 @@
     opacity: 1;
   }
 
-  .empty-state.loading { cursor: wait; }
+  .empty-state.loading {
+    cursor: wait;
+  }
 
   .empty-state.loading .logo {
     animation: pulse-loading 1s ease-in-out infinite;
   }
 
   @keyframes pulse-loading {
-    0%, 100% { opacity: 0.5; }
-    50% { opacity: 1; }
+    0%,
+    100% {
+      opacity: 0.5;
+    }
+    50% {
+      opacity: 1;
+    }
   }
 
   .loading-spinner {

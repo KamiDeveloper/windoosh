@@ -8,9 +8,32 @@
   import { getCurrentWindow } from "@tauri-apps/api/window";
   import CompareSlider from "$lib/components/CompareSlider.svelte";
   import ControlPanel from "$lib/components/ControlPanel.svelte";
+  import { originalImageInfo } from "$lib/stores/imageStore";
 
   let controlPanel: ControlPanel;
   let unlistenFn: UnlistenFn | null = null;
+
+  async function handlePaste(event: ClipboardEvent) {
+    // Si ya hay una imagen cargada, no reemplazarla (como solicitado)
+    // "al tener la aplicación sin ningúna imagen actual"
+    if ($originalImageInfo) return;
+
+    const items = event.clipboardData?.items;
+    if (!items) return;
+
+    for (const item of items) {
+      if (item.type.startsWith("image/")) {
+        event.preventDefault();
+        const file = item.getAsFile();
+        if (file && controlPanel) {
+          const buffer = await file.arrayBuffer();
+          const bytes = new Uint8Array(buffer);
+          await controlPanel.loadFromClipboard(bytes);
+          return; // Solo procesar la primera imagen encontrada
+        }
+      }
+    }
+  }
 
   onMount(() => {
     // Ocultar splash screen
@@ -21,9 +44,11 @@
     }
 
     // Mostrar ventana (async pero no bloqueante)
-    getCurrentWindow().show().catch(() => {
-      // En dev mode sin Tauri, ignorar
-    });
+    getCurrentWindow()
+      .show()
+      .catch(() => {
+        // En dev mode sin Tauri, ignorar
+      });
 
     // Escuchar evento de archivo abierto desde menú contextual
     listen<string>("open-file-from-args", (event) => {
@@ -46,6 +71,8 @@
     }
   }
 </script>
+
+<svelte:window on:paste={handlePaste} />
 
 <div class="app">
   <main class="workspace">

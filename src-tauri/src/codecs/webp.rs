@@ -9,7 +9,7 @@ pub struct WebPCodec;
 struct WebPOptions {
     quality: f32, // 0.0 - 100.0
     lossless: bool,
-    method: i32, // 0 (fast) - 6 (slowest/best), default 4
+    // method: i32, // Removed: Not supported by webp 0.3 crate
 }
 
 impl Default for WebPOptions {
@@ -17,7 +17,7 @@ impl Default for WebPOptions {
         Self {
             quality: 75.0,
             lossless: false,
-            method: 4,
+            // method: 4,
         }
     }
 }
@@ -34,7 +34,8 @@ impl ImageEncoder for WebPCodec {
     fn encode(&self, image: &DynamicImage, options: &Value) -> Result<EncodingResult, String> {
         let opts: WebPOptions = serde_json::from_value(options.clone()).unwrap_or_default();
 
-        let encoder = webp::Encoder::from_image(image).map_err(|e| format!("Error creando WebP encoder: {}", e))?;
+        let encoder = webp::Encoder::from_image(image)
+            .map_err(|e| format!("Error creando WebP encoder: {}", e))?;
 
         let memory = if opts.lossless {
             encoder.encode_lossless()
@@ -42,7 +43,7 @@ impl ImageEncoder for WebPCodec {
             encoder.encode(opts.quality)
         };
 
-        // Note: 'webp' crate handling related to 'method' is implicit in standard encode for simple API, 
+        // Note: 'webp' crate handling related to 'method' is implicit in standard encode for simple API,
         // to use advanced config (method, thread_level) we might need unsafe access or waiting for crate update.
         // For now, simpler implementation with just Quality/Lossless.
         // If exact parity with Squoosh method (0-6) is needed, we need to check if 'webp' crate exposes Config or advanced encoding.

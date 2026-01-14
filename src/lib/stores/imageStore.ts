@@ -1,4 +1,4 @@
-import { writable, derived, get } from 'svelte/store';
+import { writable, derived, get } from "svelte/store";
 
 // ============================================================================
 // Tipos - Sistema Canvas-based (como Squoosh)
@@ -12,6 +12,7 @@ export interface ImageInfo {
   width: number;
   height: number;
   original_size: number;
+  name: string;
 }
 
 /**
@@ -89,39 +90,42 @@ export const optimizedCanvasReady = writable(false);
 export const encoderOptions = writable<EncoderOptions>({
   encoder_name: "mozjpeg",
   options: {
-    quality: 75
-  }
+    quality: 75,
+  },
 });
 
 /** Store para tracking de operaciones cancelables (futuro) */
 export const currentOperationId = writable<string | null>(null);
+
+/** Store para comunicar archivos soltados (Drag & Drop) desde CompareSlider a ControlPanel */
+export const droppedFile = writable<string | null>(null);
 
 // ============================================================================
 // Derived Helpers (Estadísticas formateadas)
 // ============================================================================
 
 function formatBytes(bytes: number, decimals = 2): string {
-  if (bytes === 0) return '0 B';
+  if (bytes === 0) return "0 B";
   const k = 1024;
   const dm = decimals < 0 ? 0 : decimals;
-  const sizes = ['B', 'KB', 'MB', 'GB'];
+  const sizes = ["B", "KB", "MB", "GB"];
   const i = Math.floor(Math.log(bytes) / Math.log(k));
-  return parseFloat((bytes / Math.pow(k, i)).toFixed(dm)) + ' ' + sizes[i];
+  return parseFloat((bytes / Math.pow(k, i)).toFixed(dm)) + " " + sizes[i];
 }
 
-export const originalSizeFormatted = derived(originalImageInfo, $img => 
-  $img ? formatBytes($img.original_size) : '0 B'
+export const originalSizeFormatted = derived(originalImageInfo, ($img) =>
+  $img ? formatBytes($img.original_size) : "0 B"
 );
 
-export const optimizedSizeFormatted = derived(optimizationResult, $prev => 
-  $prev ? formatBytes($prev.optimized_size) : '0 B'
+export const optimizedSizeFormatted = derived(optimizationResult, ($prev) =>
+  $prev ? formatBytes($prev.optimized_size) : "0 B"
 );
 
-export const savingsFormatted = derived(optimizationResult, $prev => 
-  $prev ? `${$prev.savings_percent.toFixed(1)}%` : '0%'
+export const savingsFormatted = derived(optimizationResult, ($prev) =>
+  $prev ? `${$prev.savings_percent.toFixed(1)}%` : "0%"
 );
 
-export const originalDimensions = derived(originalImageInfo, $img => 
+export const originalDimensions = derived(originalImageInfo, ($img) =>
   $img ? { width: $img.width, height: $img.height } : null
 );
 
@@ -173,12 +177,12 @@ export function drawImageDataToCanvas(
     canvas.width = imageData.width;
     canvas.height = imageData.height;
   }
-  
-  const ctx = canvas.getContext('2d', {
+
+  const ctx = canvas.getContext("2d", {
     alpha: true,
     desynchronized: true, // Mejor performance
   });
-  
+
   if (ctx) {
     ctx.putImageData(imageData, 0, 0);
   }

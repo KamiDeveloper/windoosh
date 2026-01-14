@@ -88,6 +88,7 @@ pub struct ImageInfo {
     pub width: u32,
     pub height: u32,
     pub original_size: usize,
+    pub name: String,
 }
 
 /// Datos raw de imagen para canvas rendering (RGBA)
@@ -168,19 +169,15 @@ fn resize_with_simd(
 ) -> Result<DynamicImage, WindooshError> {
     let src_rgba = src.to_rgba8();
     let (src_w, src_h) = src_rgba.dimensions();
-    
+
     // Si las dimensiones son iguales, no hay que hacer resize
     if src_w == target_width && src_h == target_height {
         return Ok(DynamicImage::ImageRgba8(src_rgba));
     }
 
     // Crear imagen fuente para fast_image_resize
-    let src_image = Image::from_vec_u8(
-        src_w,
-        src_h,
-        src_rgba.into_raw(),
-        PixelType::U8x4,
-    ).map_err(|e| WindooshError::Processing(format!("Error creando imagen fuente: {}", e)))?;
+    let src_image = Image::from_vec_u8(src_w, src_h, src_rgba.into_raw(), PixelType::U8x4)
+        .map_err(|e| WindooshError::Processing(format!("Error creando imagen fuente: {}", e)))?;
 
     // Crear imagen destino
     let mut dst_image = Image::new(target_width, target_height, PixelType::U8x4);
@@ -200,7 +197,8 @@ fn resize_with_simd(
 
     // Ejecutar resize
     let options = ResizeOptions::new().resize_alg(algorithm);
-    resizer.resize(&src_image, &mut dst_image, Some(&options))
+    resizer
+        .resize(&src_image, &mut dst_image, Some(&options))
         .map_err(|e| WindooshError::Processing(format!("Error en resize: {}", e)))?;
 
     // Convertir de vuelta a DynamicImage
@@ -212,33 +210,43 @@ fn resize_with_simd(
 }
 
 /// Aplica quantización de colores (reducción de paleta)
-fn apply_quantize(img: DynamicImage, opts: &QuantizeOptionsDto) -> Result<DynamicImage, WindooshError> {
+fn apply_quantize(
+    img: DynamicImage,
+    opts: &QuantizeOptionsDto,
+) -> Result<DynamicImage, WindooshError> {
     let mut liq = imagequant::new();
-    liq.set_speed(3).map_err(|e| WindooshError::Processing(format!("Liq speed error: {:?}", e)))?;
-    liq.set_quality(0, 100).map_err(|e| WindooshError::Processing(format!("Liq quality error: {:?}", e)))?;
-    liq.set_max_colors(opts.num_colors.clamp(2, 256)).map_err(|e| WindooshError::Processing(format!("Liq max colors error: {:?}", e)))?;
+    liq.set_speed(3)
+        .map_err(|e| WindooshError::Processing(format!("Liq speed error: {:?}", e)))?;
+    liq.set_quality(0, 100)
+        .map_err(|e| WindooshError::Processing(format!("Liq quality error: {:?}", e)))?;
+    liq.set_max_colors(opts.num_colors.clamp(2, 256))
+        .map_err(|e| WindooshError::Processing(format!("Liq max colors error: {:?}", e)))?;
 
     let rgba = img.to_rgba8();
     let width = rgba.width() as usize;
     let height = rgba.height() as usize;
-    
-    let pixels: Vec<imagequant::RGBA> = rgba.pixels()
+
+    let pixels: Vec<imagequant::RGBA> = rgba
+        .pixels()
         .map(|p| {
             let [r, g, b, a] = p.0;
             imagequant::RGBA::new(r, g, b, a)
         })
         .collect();
 
-    let mut img_attr = liq.new_image(pixels, width, height, 0.0)
+    let mut img_attr = liq
+        .new_image(pixels, width, height, 0.0)
         .map_err(|e| WindooshError::Processing(format!("Liq new image error: {:?}", e)))?;
-    
-    let mut res = liq.quantize(&mut img_attr)
+
+    let mut res = liq
+        .quantize(&mut img_attr)
         .map_err(|e| WindooshError::Processing(format!("Quantization failed: {:?}", e)))?;
-    
+
     res.set_dithering_level(opts.dither.clamp(0.0, 1.0))
         .map_err(|e| WindooshError::Processing(format!("Liq dither error: {:?}", e)))?;
-    
-    let (palette, pixels_idx) = res.remapped(&mut img_attr)
+
+    let (palette, pixels_idx) = res
+        .remapped(&mut img_attr)
         .map_err(|e| WindooshError::Processing(format!("Remapping failed: {:?}", e)))?;
 
     let mut new_rgba = Vec::with_capacity(width * height * 4);
@@ -268,7 +276,7 @@ fn extract_rgba_data(img: &DynamicImage) -> ImageDataRaw {
 }
 
 /// Pipeline de procesamiento completo - ahora retorna la imagen procesada
-/// IMPORTANTE: Para mostrar artefactos de compresión (como Squoosh), 
+/// IMPORTANTE: Para mostrar artefactos de compresión (como Squoosh),
 /// re-decodificamos la imagen comprimida para preview
 /// Retorna: (EncodingResult, DynamicImage para preview)
 fn process_pipeline(
@@ -277,7 +285,12 @@ fn process_pipeline(
 ) -> Result<(EncodingResult, DynamicImage), WindooshError> {
     // 1. Resize con SIMD (si es necesario)
     let processed = if let Some(ref resize_opts) = request.resize {
-        resize_with_simd(img, resize_opts.width, resize_opts.height, &resize_opts.filter)?
+        resize_with_simd(
+            img,
+            resize_opts.width,
+            resize_opts.height,
+            &resize_opts.filter,
+        )?
     } else {
         (**img).clone()
     };
@@ -291,9 +304,10 @@ fn process_pipeline(
 
     // 3. Encode con el códec seleccionado
     let encoder = get_encoder(&request.encoder_name);
-    let result = encoder.encode(&final_img, &request.options)
+    let result = encoder
+        .encode(&final_img, &request.options)
         .map_err(WindooshError::Encoding)?;
-    
+
     // 4. RE-DECODIFICAR la imagen comprimida para mostrar artefactos de compresión
     // Esto es lo que hace Squoosh: muestra cómo se ve la imagen DESPUÉS de compresión
     // No la imagen original pre-encoding
@@ -308,40 +322,41 @@ fn process_pipeline(
         // Para PNG (sin pérdida), no hay artefactos visibles
         final_img
     };
-    
+
     Ok((result, preview_img))
 }
-
 
 // ============================================================================
 // Comandos Tauri - Async para no bloquear UI
 // ============================================================================
 
+/// Helper para cargar imagen desde bytes y actualizar estado
+fn load_image_logic(bytes: Vec<u8>) -> Result<(Arc<DynamicImage>, usize, u32, u32), WindooshError> {
+    let file_size = bytes.len();
+    let img = ImageReader::new(Cursor::new(&bytes))
+        .with_guessed_format()
+        .map_err(|e| WindooshError::ImageDecode(e.to_string()))?
+        .decode()
+        .map_err(|e| WindooshError::ImageDecode(e.to_string()))?;
+
+    let width = img.width();
+    let height = img.height();
+
+    Ok((Arc::new(img), file_size, width, height))
+}
+
 /// Carga una imagen desde disco de forma asíncrona
 /// NO devuelve preview - el frontend debe llamar a get_original_image_data
 #[tauri::command]
-async fn load_image(
-    path: String,
-    state: State<'_, AppState>,
-) -> Result<ImageInfo, String> {
+async fn load_image(path: String, state: State<'_, AppState>) -> Result<ImageInfo, String> {
     let path_for_load = path.clone();
-    
+
     // Ejecutar I/O y decode en thread pool
     let (img_arc, file_size, width, height) = tauri::async_runtime::spawn_blocking(move || {
-        let file_bytes = std::fs::read(&path_for_load)
-            .map_err(|e| WindooshError::FileRead(e.to_string()))?;
-        let file_size = file_bytes.len();
+        let file_bytes =
+            std::fs::read(&path_for_load).map_err(|e| WindooshError::FileRead(e.to_string()))?;
 
-        let img = ImageReader::new(Cursor::new(&file_bytes))
-            .with_guessed_format()
-            .map_err(|e| WindooshError::ImageDecode(e.to_string()))?
-            .decode()
-            .map_err(|e| WindooshError::ImageDecode(e.to_string()))?;
-
-        let width = img.width();
-        let height = img.height();
-
-        Ok::<_, WindooshError>((Arc::new(img), file_size, width, height))
+        load_image_logic(file_bytes)
     })
     .await
     .map_err(|e| WindooshError::Concurrency(e.to_string()))?
@@ -351,57 +366,85 @@ async fn load_image(
     {
         *state.original_image.write() = Some(Arc::clone(&img_arc));
         *state.original_size.write() = file_size;
-        *state.original_path.write() = Some(path);
+        *state.original_path.write() = Some(path.clone());
         *state.processed_image.write() = None; // Reset processed
+    }
+
+    let display_name = std::path::Path::new(&path)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("image")
+        .to_string();
+
+    Ok(ImageInfo {
+        width,
+        height,
+        original_size: file_size,
+        name: display_name,
+    })
+}
+
+/// Carga una imagen desde memoria (bytes) - Usado para Clipboard paste
+#[tauri::command]
+async fn load_image_from_bytes(
+    bytes: Vec<u8>,
+    state: State<'_, AppState>,
+) -> Result<ImageInfo, String> {
+    let (img_arc, file_size, width, height) =
+        tauri::async_runtime::spawn_blocking(move || load_image_logic(bytes))
+            .await
+            .map_err(|e| WindooshError::Concurrency(e.to_string()))?
+            .map_err(String::from)?;
+
+    {
+        *state.original_image.write() = Some(Arc::clone(&img_arc));
+        *state.original_size.write() = file_size;
+        *state.original_path.write() = None; // No path for clipboard images
+        *state.processed_image.write() = None;
     }
 
     Ok(ImageInfo {
         width,
         height,
         original_size: file_size,
+        name: "Clipboard Image".to_string(),
     })
 }
 
 /// Obtiene los datos raw RGBA de la imagen original para canvas
 /// Esta función permite zoom sin pérdida de calidad
 #[tauri::command]
-async fn get_original_image_data(
-    state: State<'_, AppState>,
-) -> Result<ImageDataRaw, String> {
+async fn get_original_image_data(state: State<'_, AppState>) -> Result<ImageDataRaw, String> {
     let img_arc = {
         let guard = state.original_image.read();
-        guard.as_ref()
+        guard
+            .as_ref()
             .ok_or_else(|| WindooshError::NoImage)?
             .clone()
     };
 
     // Extraer RGBA en thread pool (puede ser pesado para imágenes 4K+)
-    let result = tauri::async_runtime::spawn_blocking(move || {
-        extract_rgba_data(&img_arc)
-    })
-    .await
-    .map_err(|e| WindooshError::Concurrency(e.to_string()))?;
+    let result = tauri::async_runtime::spawn_blocking(move || extract_rgba_data(&img_arc))
+        .await
+        .map_err(|e| WindooshError::Concurrency(e.to_string()))?;
 
     Ok(result)
 }
 
 /// Obtiene los datos raw RGBA de la imagen procesada para canvas
 #[tauri::command]
-async fn get_processed_image_data(
-    state: State<'_, AppState>,
-) -> Result<ImageDataRaw, String> {
+async fn get_processed_image_data(state: State<'_, AppState>) -> Result<ImageDataRaw, String> {
     let img_arc = {
         let guard = state.processed_image.read();
-        guard.as_ref()
+        guard
+            .as_ref()
             .ok_or_else(|| WindooshError::NoImage)?
             .clone()
     };
 
-    let result = tauri::async_runtime::spawn_blocking(move || {
-        extract_rgba_data(&img_arc)
-    })
-    .await
-    .map_err(|e| WindooshError::Concurrency(e.to_string()))?;
+    let result = tauri::async_runtime::spawn_blocking(move || extract_rgba_data(&img_arc))
+        .await
+        .map_err(|e| WindooshError::Concurrency(e.to_string()))?;
 
     Ok(result)
 }
@@ -416,19 +459,19 @@ async fn process_image(
     // Obtener Arc sin clonar bytes subyacentes
     let img_arc = {
         let guard = state.original_image.read();
-        guard.as_ref()
+        guard
+            .as_ref()
             .ok_or_else(|| WindooshError::NoImage)?
             .clone() // Arc::clone = O(1)
     };
     let original_size = *state.original_size.read();
 
     // Procesar en thread pool
-    let (result, processed_img) = tauri::async_runtime::spawn_blocking(move || {
-        process_pipeline(&img_arc, &request)
-    })
-    .await
-    .map_err(|e| WindooshError::Concurrency(e.to_string()))?
-    .map_err(String::from)?;
+    let (result, processed_img) =
+        tauri::async_runtime::spawn_blocking(move || process_pipeline(&img_arc, &request))
+            .await
+            .map_err(|e| WindooshError::Concurrency(e.to_string()))?
+            .map_err(String::from)?;
 
     let optimized_size = result.data.len();
     let savings_percent = if original_size > 0 {
@@ -465,13 +508,14 @@ async fn save_image(
 ) -> Result<SaveResult, String> {
     let img_arc = {
         let guard = state.original_image.read();
-        guard.as_ref()
+        guard
+            .as_ref()
             .ok_or_else(|| WindooshError::NoImage)?
             .clone()
     };
 
     let path_for_save = path.clone();
-    
+
     let final_size = tauri::async_runtime::spawn_blocking(move || {
         let (result, _) = process_pipeline(&img_arc, &request)?;
         std::fs::write(&path_for_save, &result.data)
@@ -482,10 +526,7 @@ async fn save_image(
     .map_err(|e| WindooshError::Concurrency(e.to_string()))?
     .map_err(String::from)?;
 
-    Ok(SaveResult {
-        path,
-        final_size,
-    })
+    Ok(SaveResult { path, final_size })
 }
 
 /// Obtiene la metadata de la última optimización
@@ -519,6 +560,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             load_image,
+            load_image_from_bytes,
             process_image,
             save_image,
             get_optimization_metadata,

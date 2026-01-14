@@ -16,8 +16,12 @@
     originalSizeFormatted,
     optimizedSizeFormatted,
     savingsFormatted,
+    droppedFile,
     type ImageInfo,
     type OptimizationResult,
+    type OptimizationRequest,
+    type EncoderOptions,
+    resetStores,
   } from "$lib/stores/imageStore";
   import { slide } from "svelte/transition";
   import { generalIcons, panelSectionsIcons, toolsIcons } from "$lib/icons";
@@ -38,17 +42,17 @@
   let quantizeColors = 256;
   let quantizeDither = 1.0;
 
-  // Listener para drag & drop desde CompareSlider
-  function handleDroppedFile(e: CustomEvent<string>) {
-    loadImage(e.detail);
+  // Listener para drag & drop desde CompareSlider via Store
+  $: if ($droppedFile) {
+    loadImage($droppedFile);
+    droppedFile.set(null); // Reset after consumption
   }
 
   onMount(() => {
-    window.addEventListener("load-dropped-file", handleDroppedFile as EventListener);
+    // Window event listener removed in favor of store
   });
 
   onDestroy(() => {
-    window.removeEventListener("load-dropped-file", handleDroppedFile as EventListener);
     clearTimeout(debounceTimer);
   });
 
@@ -137,6 +141,28 @@
   }
 
   // Exponer para uso externo
+  export async function loadFromClipboard(bytes: Uint8Array) {
+    isLoading.set(true);
+    try {
+      // Tauri maneja Uint8Array -> Vec<u8> automáticamente
+      const result = await invoke<ImageInfo>("load_image_from_bytes", {
+        bytes,
+      });
+      originalImageInfo.set(result);
+      if (result) {
+        resizeWidth = result.width;
+        resizeHeight = result.height;
+        aspectRatio = result.width / result.height;
+      }
+      await processImage();
+    } catch (err) {
+      console.error("Error al cargar imagen del portapapeles:", err);
+    } finally {
+      isLoading.set(false);
+    }
+  }
+
+  // Exponer para uso externo
   export async function loadImage(path: string) {
     isLoading.set(true);
     try {
@@ -159,8 +185,8 @@
     if (!$originalImageInfo) return;
     isProcessing.set(true);
 
-    // Construir request
-    const request: any = {
+    // Construir request con tipos estrictos
+    const request: OptimizationRequest = {
       encoder_name: $encoderOptions.encoder_name,
       options: $encoderOptions.options,
     };
@@ -222,6 +248,15 @@
     if (!$originalImageInfo || !$optimizationResult) return;
     const ext = $optimizationResult.extension;
     try {
+      // Smart Filename: original_name + "_optimized"
+      const originalName = $originalImageInfo.name;
+      const baseName =
+        originalName.lastIndexOf(".") !== -1
+          ? originalName.substring(0, originalName.lastIndexOf("."))
+          : originalName;
+
+      const defaultName = `${baseName}_optimized.${ext}`;
+
       const selected = await save({
         filters: [
           {
@@ -229,12 +264,12 @@
             extensions: [ext],
           },
         ],
-        defaultPath: `optimized.${ext}`,
+        defaultPath: defaultName,
       });
 
       if (selected) {
         // Construir request save (mismo que process)
-        const request: any = {
+        const request: OptimizationRequest = {
           encoder_name: $encoderOptions.encoder_name,
           options: $encoderOptions.options,
         };
@@ -264,18 +299,20 @@
   <!-- Header -->
   <div class="panel-header">
     <h1>Windoosh</h1>
-    <button
-      class="btn-icon"
-      title="Abrir Imagen"
-      on:click={handleOpenFile}
-      disabled={$isLoading}
-    >
-      {#if $isLoading}
-        <span class="loader"></span>
-      {:else}
-        {@html generalIcons.iconUpload}
-      {/if}
-    </button>
+    <div class="header-actions">
+      <button
+        class="btn-icon"
+        title="Abrir Imagen"
+        on:click={handleOpenFile}
+        disabled={$isLoading}
+      >
+        {#if $isLoading}
+          <span class="loader"></span>
+        {:else}
+          {@html generalIcons.iconUpload}
+        {/if}
+      </button>
+    </div>
   </div>
 
   <div class="scroll-content">
@@ -566,22 +603,7 @@
               />
             </div>
 
-            <div class="control-group">
-              <div class="label-row">
-                <label for="webp-effort">Effort</label>
-                <span class="value">{$encoderOptions.options.method || 4}</span>
-              </div>
-              <input
-                id="webp-effort"
-                type="range"
-                class="squoosh-slider"
-                min="0"
-                max="6"
-                value={$encoderOptions.options.method || 4}
-                on:input={(e) =>
-                  handleOptionChange("method", parseInt(e.currentTarget.value))}
-              />
-            </div>
+            <!-- WebP Effort slider removed because backend crate 'webp' v0.3 does not support it exposed in public API yet -->
           {/if}
         </div>
       </div>
@@ -598,7 +620,9 @@
         </div>
         <div class="stat-divider">↓</div>
         <div class="stat-item">
-          <span class="label">{$optimizationResult.extension.toUpperCase()}</span>
+          <span class="label"
+            >{$optimizationResult.extension.toUpperCase()}</span
+          >
           <span class="val highlight">{$optimizedSizeFormatted}</span>
         </div>
         <div
@@ -654,6 +678,11 @@
     -webkit-text-fill-color: transparent;
   }
 
+  .header-actions {
+    display: flex;
+    gap: 8px;
+  }
+
   .btn-icon {
     background: transparent;
     border: 1px solid var(--border);
@@ -683,12 +712,12 @@
   .input-row {
     display: flex;
     align-items: flex-end; /* Alinea los inputs y el candado por la base */
-    gap: 8px;              /* Espacio uniforme entre elementos */
+    gap: 8px; /* Espacio uniforme entre elementos */
     margin-bottom: 10px;
   }
 
   .input-group {
-    flex: 1;               /* Esto hace que Width y Height midan exactamente lo mismo */
+    flex: 1; /* Esto hace que Width y Height midan exactamente lo mismo */
     display: flex;
     flex-direction: column;
     gap: 4px;
@@ -701,7 +730,7 @@
   }
 
   .input-group input {
-    width: 100%;           /* Ocupa todo el espacio que le da el flex: 1 */
+    width: 100%; /* Ocupa todo el espacio que le da el flex: 1 */
     box-sizing: border-box; /* Vital para que el padding no "infle" el input */
     background: var(--bg-input);
     border: 1px solid var(--border);
@@ -732,9 +761,9 @@
     display: flex;
     align-items: center;
     justify-content: center;
-    width: 24px;  /* Ancho fijo para el área del candado */
+    width: 24px; /* Ancho fijo para el área del candado */
     height: 24px;
-    padding: 0;   /* Elimina cualquier padding que mueva el icono */
+    padding: 0; /* Elimina cualquier padding que mueva el icono */
     font-size: 18px;
     opacity: 0.6;
     transition: opacity 0.2s;
