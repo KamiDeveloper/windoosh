@@ -5,6 +5,7 @@
 -->
 <script lang="ts">
   import { onMount, onDestroy } from "svelte";
+  import { get } from "svelte/store";
   import { invoke } from "@tauri-apps/api/core";
   import { open, save } from "@tauri-apps/plugin-dialog";
   import {
@@ -23,10 +24,40 @@
     type EncoderOptions,
     resetStores,
   } from "$lib/stores/imageStore";
+  import { listen } from "@tauri-apps/api/event";
+  import {
+    settingsStore,
+    loadSettings,
+    saveSettings,
+    toggleContextMenu,
+    syncContextMenuState,
+    generateId, // Assuming this is exported now
+    type AppSettings,
+    type OptimizePreset,
+  } from "$lib/stores/settingsStore";
+  import {
+    generalIcons,
+    panelSectionsIcons,
+    toolsIcons,
+    specificControlsIcons,
+  } from "$lib/icons"; // Added specificControlsIcons for modal
   import { slide } from "svelte/transition";
-  import { generalIcons, panelSectionsIcons, toolsIcons } from "$lib/icons";
 
   let debounceTimer: ReturnType<typeof setTimeout>;
+  let showSettings = false;
+
+  // Preset Create/Edit State
+  let editingPresetId: string | null = null;
+  let presetForm = {
+    name: "",
+    encoder: "webp",
+    quality: 80,
+    effort: 4,
+    resize: false,
+    width: 0,
+    quantize: false,
+    colors: 128,
+  };
 
   // Estado local para UI (Resize)
   let resizeEnabled = false;
@@ -49,8 +80,78 @@
   }
 
   onMount(() => {
-    // Window event listener removed in favor of store
+    let unlisten: (() => void) | undefined;
+    let unlistenPreset: (() => void) | undefined;
+
+    const init = async () => {
+      loadSettings();
+      await syncContextMenuState();
+
+      // 1. Listen for generic quick optimize (Legacy support)
+      unlisten = await listen<string>("quick-optimize", async (event) => {
+        // Apply first preset or default
+        const presets = get(settingsStore).presets;
+        if (presets.length > 0) {
+          applyPreset(presets[0], event.payload);
+        }
+      });
+
+      // 2. Listen for specific presets
+      unlistenPreset = await listen<[string, string]>(
+        "preset-optimize",
+        async (event) => {
+          const [presetId, filePath] = event.payload;
+          const presets = get(settingsStore).presets;
+          const preset = presets.find((p) => p.id === presetId);
+          if (preset && filePath) {
+            await applyPreset(preset, filePath);
+          }
+        }
+      );
+    };
+
+    init();
+
+    return () => {
+      if (unlisten) unlisten();
+      if (unlistenPreset) unlistenPreset();
+    };
   });
+
+  async function applyPreset(preset: any, filePath: string) {
+    await loadImage(filePath);
+    // Set Encoder
+    encoderOptions.set({
+      encoder_name: preset.encoder.name,
+      options: preset.encoder.options,
+    });
+    // Set Resize if enabled
+    if (preset.resize && preset.resize.enabled) {
+      resizeEnabled = true;
+      // Logic for width/height/preset?
+      // For now let's just assume explicit options or default
+      resizeMethod = preset.resize.method || "Lanczos3";
+
+      if (preset.resize.width) {
+        resizeWidth = preset.resize.width;
+        // Auto calc height if we had aspect ratio...
+        // But valid image is loaded now, so we can calculate
+      }
+    } else {
+      resizeEnabled = false;
+    }
+
+    // Set Quantize if enabled
+    if (preset.quantize && preset.quantize.enabled) {
+      quantizeEnabled = true;
+      quantizeColors = preset.quantize.colors;
+      quantizeDither = preset.quantize.dither;
+    } else {
+      quantizeEnabled = false;
+    }
+
+    triggerProcess();
+  }
 
   onDestroy(() => {
     clearTimeout(debounceTimer);
@@ -293,6 +394,109 @@
       console.error("Error al guardar:", err);
     }
   }
+
+  async function handleToggleContextMenu(e: Event) {
+    const checked = (e.target as HTMLInputElement).checked;
+    try {
+      await toggleContextMenu(checked);
+    } catch (err) {
+      console.error("Failed to toggle context menu:", err);
+      await syncContextMenuState();
+    }
+  }
+
+  // --- Preset Logic ---
+  function createNewPreset() {
+    presetForm = {
+      name: "New Preset",
+      encoder: "webp",
+      quality: 80,
+      effort: 4,
+      resize: false,
+      width: 800,
+      quantize: false,
+      colors: 128,
+    };
+    editingPresetId = "NEW";
+  }
+
+  function editPreset(preset: OptimizePreset) {
+    editingPresetId = preset.id;
+    // Map schema to form
+    const isJpeg = preset.encoder.name === "mozjpeg";
+    const isWebp = preset.encoder.name === "webp";
+    const isPng = preset.encoder.name === "oxipng";
+
+    presetForm = {
+      name: preset.name,
+      encoder: preset.encoder.name,
+      quality: (preset.encoder.options as any).quality || 80,
+      effort:
+        (preset.encoder.options as any).level ||
+        (preset.encoder.options as any).method ||
+        4,
+      resize: preset.resize?.enabled || false,
+      width: preset.resize?.width || 800,
+      quantize: preset.quantize?.enabled || false,
+      colors: preset.quantize?.colors || 128,
+    };
+  }
+
+  function deletePreset(id: string) {
+    const s = get(settingsStore);
+    const newPresets = s.presets.filter((p) => p.id !== id);
+    saveSettings({ ...s, presets: newPresets });
+  }
+
+  function savePreset() {
+    const s = get(settingsStore);
+    let newPresets = [...s.presets];
+
+    const newPreset: OptimizePreset = {
+      id: editingPresetId === "NEW" ? generateId() : editingPresetId!,
+      name: presetForm.name,
+      encoder: {
+        name: presetForm.encoder as any,
+        options: {},
+      },
+      resize: {
+        enabled: presetForm.resize,
+        width: presetForm.width,
+        method: "Lanczos3",
+      },
+      quantize: {
+        enabled: presetForm.quantize,
+        colors: presetForm.quantize ? presetForm.colors : 256,
+        dither: 1.0,
+      },
+    };
+
+    // Set encoder options
+    if (presetForm.encoder === "mozjpeg") {
+      newPreset.encoder.options = { quality: presetForm.quality };
+    } else if (presetForm.encoder === "webp") {
+      newPreset.encoder.options = {
+        quality: presetForm.quality,
+        lossless: false,
+        method: presetForm.effort,
+      };
+    } else if (presetForm.encoder === "oxipng") {
+      newPreset.encoder.options = {
+        level: presetForm.effort,
+        interlace: false,
+      };
+    }
+
+    if (editingPresetId === "NEW") {
+      newPresets.push(newPreset);
+    } else {
+      const idx = newPresets.findIndex((p) => p.id === editingPresetId);
+      if (idx !== -1) newPresets[idx] = newPreset;
+    }
+
+    saveSettings({ ...s, presets: newPresets });
+    editingPresetId = null;
+  }
 </script>
 
 <aside class="control-panel">
@@ -300,6 +504,14 @@
   <div class="panel-header">
     <h1>Windoosh</h1>
     <div class="header-actions">
+      <button
+        class="btn-icon"
+        title="Settings"
+        on:click={() => (showSettings = true)}
+      >
+        {@html panelSectionsIcons.iconSettings}
+      </button>
+
       <button
         class="btn-icon"
         title="Abrir Imagen"
@@ -314,6 +526,186 @@
       </button>
     </div>
   </div>
+
+  <!-- Settings Modal -->
+  {#if showSettings}
+    <div
+      class="modal-backdrop"
+      role="button"
+      tabindex="0"
+      on:click|self={() => (showSettings = false)}
+      on:keydown={(e) => e.key === "Escape" && (showSettings = false)}
+    >
+      <div class="modal-content" transition:slide={{ duration: 200 }}>
+        <div class="modal-header">
+          <h2>Settings</h2>
+          <button class="btn-icon" on:click={() => (showSettings = false)}>
+            {@html generalIcons.iconClose}
+          </button>
+        </div>
+
+        <div class="modal-body">
+          <!-- Windows Integration -->
+          <section class="settings-section">
+            <h3>System Integration</h3>
+            <div class="control-group checkbox-row">
+              <input
+                type="checkbox"
+                id="ctx-menu"
+                checked={$settingsStore.contextMenuEnabled}
+                on:change={handleToggleContextMenu}
+              />
+              <label for="ctx-menu">Show in Windows Context Menu</label>
+            </div>
+          </section>
+
+          <!-- Quick Optimize Defaults -->
+          <section class="settings-section">
+            <h3>Presets Manager</h3>
+            <p class="hint">
+              Define the presets available in the "Quick Optimize" submenu.
+            </p>
+
+            {#if !editingPresetId}
+              <!-- List View -->
+              <div class="presets-list">
+                {#each $settingsStore.presets as preset}
+                  <div class="preset-item">
+                    <div class="preset-info">
+                      <span class="preset-name">{preset.name}</span>
+                      <span class="preset-details">{preset.encoder.name}</span>
+                    </div>
+                    <div class="preset-actions">
+                      <button
+                        class="btn-icon-small"
+                        on:click={() => editPreset(preset)}>✎</button
+                      >
+                      <button
+                        class="btn-icon-small"
+                        on:click={() => deletePreset(preset.id)}>🗑</button
+                      >
+                    </div>
+                  </div>
+                {/each}
+                <button
+                  class="btn-primary"
+                  style="margin-top: 10px; width: 100%;"
+                  on:click={createNewPreset}>+ Add New Preset</button
+                >
+              </div>
+            {:else}
+              <!-- Edit View -->
+              <div class="preset-edit-form" transition:slide>
+                <div class="control-group">
+                  <label for="preset-name">Preset Name</label>
+                  <input
+                    type="text"
+                    bind:value={presetForm.name}
+                    placeholder="My Preset"
+                    class="settings-input"
+                  />
+                </div>
+
+                <div class="control-group">
+                  <label for="format">Format</label>
+                  <select bind:value={presetForm.encoder}>
+                    <option value="mozjpeg">MozJPEG</option>
+                    <option value="oxipng">OxiPNG</option>
+                    <option value="webp">WebP</option>
+                  </select>
+                </div>
+
+                {#if presetForm.encoder === "mozjpeg" || presetForm.encoder === "webp"}
+                  <div class="control-group">
+                    <label for="quality">Quality ({presetForm.quality})</label>
+                    <input
+                      type="range"
+                      min="0"
+                      max="100"
+                      bind:value={presetForm.quality}
+                      class="squoosh-slider"
+                    />
+                    <div
+                      class="quality-bar"
+                      style="--q: {presetForm.quality}%"
+                    ></div>
+                  </div>
+                {/if}
+
+                {#if presetForm.encoder === "oxipng" || presetForm.encoder === "webp"}
+                  <div class="control-group">
+                    <label for="effort">Effort ({presetForm.effort})</label>
+                    <input
+                      type="range"
+                      min="0"
+                      max="6"
+                      bind:value={presetForm.effort}
+                      class="squoosh-slider"
+                    />
+                  </div>
+                {/if}
+
+                <!-- Resize Option -->
+                <div class="control-group checkbox-row">
+                  <input
+                    type="checkbox"
+                    id="p-resize"
+                    bind:checked={presetForm.resize}
+                  />
+                  <label for="p-resize">Resize (Width Only)</label>
+                </div>
+                {#if presetForm.resize}
+                  <div class="control-group">
+                    <input
+                      type="number"
+                      bind:value={presetForm.width}
+                      placeholder="Width (px)"
+                      class="settings-input"
+                    />
+                    <span class="hint">Height calculated automatically</span>
+                  </div>
+                {/if}
+
+                <!-- Quantize Option -->
+                <div class="control-group checkbox-row">
+                  <input
+                    type="checkbox"
+                    id="p-quant"
+                    bind:checked={presetForm.quantize}
+                  />
+                  <label for="p-quant">Reduce Palette</label>
+                </div>
+                {#if presetForm.quantize}
+                  <div class="control-group">
+                    <label for="colors">Colors ({presetForm.colors})</label>
+                    <input
+                      type="range"
+                      min="2"
+                      max="256"
+                      bind:value={presetForm.colors}
+                      class="squoosh-slider"
+                    />
+                  </div>
+                {/if}
+
+                <div
+                  class="form-actions"
+                  style="display: flex; gap: 10px; margin-top: 20px;"
+                >
+                  <button class="btn-save" on:click={savePreset}>Save</button>
+                  <button
+                    class="btn-icon"
+                    style="flex:1"
+                    on:click={() => (editingPresetId = null)}>Cancel</button
+                  >
+                </div>
+              </div>
+            {/if}
+          </section>
+        </div>
+      </div>
+    </div>
+  {/if}
 
   <div class="scroll-content">
     <!-- Sección: Edit (Resize) -->
@@ -804,6 +1196,7 @@
   }
 
   /* Inputs & Controls */
+
   select {
     width: 100%;
     background: var(--bg-input);
@@ -1037,5 +1430,136 @@
   input:disabled + .slider {
     opacity: 0.5;
     cursor: not-allowed;
+  }
+  /* Modal Styles */
+  .modal-backdrop {
+    position: fixed;
+    inset: 0;
+    z-index: 9999;
+    background: rgba(0, 0, 0, 0.7);
+    backdrop-filter: blur(5px);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .modal-content {
+    background: #18181b; /* Zinc-900 hardcoded fallback or var(--bg-panel) if opaque */
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    width: 340px;
+    max-width: 90vw;
+    box-shadow: 0 20px 50px rgba(0, 0, 0, 0.5);
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    color: var(--text-main);
+  }
+
+  .modal-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 16px;
+    border-bottom: 1px solid var(--border);
+    background: rgba(255, 255, 255, 0.03);
+  }
+
+  .modal-header h2 {
+    margin: 0;
+    font-size: 16px;
+    font-weight: 600;
+    color: var(--text-main);
+  }
+
+  .modal-body {
+    padding: 24px;
+    display: flex;
+    flex-direction: column;
+    gap: 24px;
+  }
+
+  .settings-section h3 {
+    margin: 0 0 12px 0;
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    color: var(--text-muted);
+    border-bottom: 1px solid var(--border);
+    padding-bottom: 6px;
+  }
+
+  .hint {
+    font-size: 11px;
+    color: var(--text-muted);
+    margin-top: -8px;
+    margin-bottom: 16px;
+    line-height: 1.4;
+  }
+
+  /* Fix for close button in modal */
+  .modal-header .btn-icon {
+    background: transparent;
+    border: none;
+    color: var(--text-muted);
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 32px;
+    height: 32px;
+    border-radius: 6px;
+    font-size: 20px;
+    transition: all 0.2s;
+  }
+  .modal-header .btn-icon:hover {
+    background: rgba(255, 255, 255, 0.1);
+    color: white;
+  }
+  /* Preset Styles */
+  .presets-list {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+  .preset-item {
+    background: var(--bg-input);
+    border: 1px solid var(--border);
+    padding: 10px;
+    border-radius: 6px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+  }
+  .preset-info {
+    display: flex;
+    flex-direction: column;
+  }
+  .preset-name {
+    font-weight: 600;
+    font-size: 13px;
+  }
+  .preset-details {
+    font-size: 11px;
+    color: var(--text-muted);
+    text-transform: uppercase;
+  }
+  .preset-actions {
+    display: flex;
+    gap: 4px;
+  }
+  .settings-input {
+    background: var(--bg-input);
+    border: 1px solid var(--border);
+    color: var(--text-main);
+    padding: 8px;
+    border-radius: 6px;
+    font-size: 13px;
+    outline: none;
+    width: 100%;
+    box-sizing: border-box;
+  }
+  .settings-input:focus {
+    border-color: var(--primary);
   }
 </style>

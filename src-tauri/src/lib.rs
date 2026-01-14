@@ -18,9 +18,13 @@ use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::io::Cursor;
+use std::path::PathBuf;
 use std::sync::Arc;
 use tauri::{Emitter, State};
 use thiserror::Error;
+
+#[cfg(target_os = "windows")]
+use winreg::{enums::*, RegKey};
 
 // ============================================================================
 // Error Handling
@@ -536,6 +540,189 @@ fn get_optimization_metadata(state: State<AppState>) -> Option<OptimizationMetad
 }
 
 // ============================================================================
+// ============================================================================
+// Windows Registry & Context Menu Logic
+// Patrón SubCommands vacío + subclave shell interna (compatible Win10/Win11)
+// ============================================================================
+
+#[cfg(target_os = "windows")]
+fn get_exe_path() -> Result<PathBuf, String> {
+    std::env::current_exe().map_err(|e| e.to_string())
+}
+
+#[cfg(target_os = "windows")]
+#[tauri::command]
+async fn toggle_context_menu(enable: bool) -> Result<(), String> {
+    let exe_path = get_exe_path()?;
+    let exe_str = exe_path.to_str().ok_or("Invalid path")?;
+
+    let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+    let classes = hkcu
+        .open_subkey_with_flags("Software\\Classes", KEY_ALL_ACCESS)
+        .map_err(|e| e.to_string())?;
+
+    // Ruta base: Software\Classes\SystemFileAssociations\image\shell\Windoosh
+    let base_path = "SystemFileAssociations\\image\\shell\\Windoosh";
+
+    if enable {
+        // === REGISTRAR MENÚ EN CASCADA ===
+        
+        // 1. Crear clave padre
+        let (parent_key, _) = classes
+            .create_subkey(base_path)
+            .map_err(|e| e.to_string())?;
+
+        // 2. Configurar el padre
+        parent_key
+            .set_value("MUIVerb", &"Windoosh")
+            .map_err(|e| e.to_string())?;
+        parent_key
+            .set_value("Icon", &format!("\"{}\",0", exe_str))
+            .map_err(|e| e.to_string())?;
+        // IMPORTANTE: SubCommands VACÍO activa el modo cascada
+        parent_key
+            .set_value("SubCommands", &"")
+            .map_err(|e| e.to_string())?;
+
+        // 3. Crear subclave 'shell' interna para alojar los hijos
+        let (shell_key, _) = parent_key
+            .create_subkey("shell")
+            .map_err(|e| e.to_string())?;
+
+        // 4. Crear comando "Abrir imagen con Windoosh"
+        let (open_key, _) = shell_key
+            .create_subkey("Open")
+            .map_err(|e| e.to_string())?;
+        open_key
+            .set_value("", &"Abrir imagen con Windoosh")
+            .map_err(|e| e.to_string())?;
+        open_key
+            .set_value("Icon", &format!("\"{}\",0", exe_str))
+            .map_err(|e| e.to_string())?;
+        let (open_cmd, _) = open_key
+            .create_subkey("command")
+            .map_err(|e| e.to_string())?;
+        open_cmd
+            .set_value("", &format!("\"{}\" \"%1\"", exe_str))
+            .map_err(|e| e.to_string())?;
+    } else {
+        // === DESREGISTRAR ===
+        let _ = classes.delete_subkey_all(base_path);
+    }
+
+    Ok(())
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct PresetItem {
+    id: String,
+    name: String,
+}
+
+#[cfg(target_os = "windows")]
+#[tauri::command]
+async fn update_context_menu_items(items: Vec<PresetItem>) -> Result<(), String> {
+    let exe_path = get_exe_path()?;
+    let exe_str = exe_path.to_str().ok_or("Invalid path")?;
+    let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+
+    // Ruta a la subclave shell interna donde están los comandos hijos
+    let shell_path = "Software\\Classes\\SystemFileAssociations\\image\\shell\\Windoosh\\shell";
+    
+    // Verificar que existe la estructura base
+    let shell_key = match hkcu.open_subkey_with_flags(shell_path, KEY_ALL_ACCESS) {
+        Ok(key) => key,
+        Err(_) => return Err("Context menu not enabled. Enable it first.".to_string()),
+    };
+
+    // Limpiar presets antiguos (eliminar todo excepto "Open")
+    if let Ok(subkeys) = shell_key.enum_keys().collect::<Result<Vec<_>, _>>() {
+        for subkey_name in subkeys {
+            if subkey_name != "Open" {
+                let _ = shell_key.delete_subkey_all(&subkey_name);
+            }
+        }
+    }
+
+    // Asegurar que "Open" existe
+    {
+        let (open_key, _) = shell_key
+            .create_subkey("Open")
+            .map_err(|e| e.to_string())?;
+        open_key
+            .set_value("", &"Abrir imagen con Windoosh")
+            .map_err(|e| e.to_string())?;
+        open_key
+            .set_value("Icon", &format!("\"{}\",0", exe_str))
+            .map_err(|e| e.to_string())?;
+        let (open_cmd, _) = open_key
+            .create_subkey("command")
+            .map_err(|e| e.to_string())?;
+        open_cmd
+            .set_value("", &format!("\"{}\" \"%1\"", exe_str))
+            .map_err(|e| e.to_string())?;
+    }
+
+    // Crear los presets como subcomandos
+    for item in items {
+        // Sanitizar el ID para usarlo como nombre de clave de registro
+        let safe_id = item.id.replace(|c: char| !c.is_alphanumeric() && c != '-' && c != '_', "_");
+        let key_name = format!("Preset_{}", safe_id);
+        
+        let (preset_key, _) = shell_key
+            .create_subkey(&key_name)
+            .map_err(|e| e.to_string())?;
+        
+        preset_key
+            .set_value("", &item.name)
+            .map_err(|e| e.to_string())?;
+        preset_key
+            .set_value("Icon", &format!("\"{}\",0", exe_str))
+            .map_err(|e| e.to_string())?;
+        
+        let (cmd_key, _) = preset_key
+            .create_subkey("command")
+            .map_err(|e| e.to_string())?;
+        // Comando: windoosh.exe --preset "ID" "%1"
+        cmd_key
+            .set_value("", &format!("\"{}\" --preset \"{}\" \"%1\"", exe_str, item.id))
+            .map_err(|e| e.to_string())?;
+    }
+
+    Ok(())
+}
+
+#[cfg(not(target_os = "windows"))]
+#[tauri::command]
+async fn update_context_menu_items(_items: Vec<PresetItem>) -> Result<(), String> {
+    Ok(()) // No-op
+}
+
+#[cfg(target_os = "windows")]
+#[tauri::command]
+async fn get_context_menu_state() -> Result<bool, String> {
+    let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+    // Verificar si existe la clave principal
+    let path = "Software\\Classes\\SystemFileAssociations\\image\\shell\\Windoosh";
+    match hkcu.open_subkey(path) {
+        Ok(_) => Ok(true),
+        Err(_) => Ok(false),
+    }
+}
+
+// Stubs for non-windows platforms (to avoid compilation errors)
+#[cfg(not(target_os = "windows"))]
+#[tauri::command]
+async fn toggle_context_menu(_enable: bool) -> Result<(), String> {
+    Err("Not supported on this OS".to_string())
+}
+
+#[cfg(not(target_os = "windows"))]
+#[tauri::command]
+async fn get_context_menu_state() -> Result<bool, String> {
+    Ok(false)
+}
+
 // Application Entry Point
 // ============================================================================
 
@@ -548,12 +735,29 @@ pub fn run() {
         .manage(AppState::default())
         .setup(|app| {
             let args: Vec<String> = std::env::args().collect();
+
+            // Argument Parsing
             if args.len() > 1 {
-                let file_path = args[1].clone();
                 let handle = app.handle().clone();
+                let arg1 = args[1].clone();
+                let args_clone = args.clone();
+
                 std::thread::spawn(move || {
-                    std::thread::sleep(std::time::Duration::from_millis(500));
-                    let _ = handle.emit("open-file-from-args", file_path);
+                    std::thread::sleep(std::time::Duration::from_millis(800));
+
+                    if arg1 == "--preset" && args_clone.len() > 3 {
+                        // usage: windoosh --preset <id> <file>
+                        let preset_id = args_clone[2].clone();
+                        let file_path = args_clone[3].clone();
+                        let _ = handle.emit("preset-optimize", (preset_id, file_path));
+                    } else if arg1 == "--quick-optimize" && args_clone.len() > 2 {
+                        // Legacy/Fallback
+                        let file_path = args_clone[2].clone();
+                        let _ = handle.emit("quick-optimize", file_path);
+                    } else {
+                        // Open file
+                        let _ = handle.emit("open-file-from-args", arg1);
+                    }
                 });
             }
             Ok(())
@@ -565,7 +769,10 @@ pub fn run() {
             save_image,
             get_optimization_metadata,
             get_original_image_data,
-            get_processed_image_data
+            get_processed_image_data,
+            toggle_context_menu,
+            get_context_menu_state,
+            update_context_menu_items
         ])
         .run(tauri::generate_context!())
         .expect("Error al ejecutar la aplicación Tauri");
